@@ -1,0 +1,109 @@
+%%cu
+#include <cuda.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define TILE_WIDTH 8
+
+__global__ void MatrixMulKernel(float* M, float* N, float* P, int M_width, int N_height, int N_width)
+{
+    __shared__ float ds_M[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float ds_N[TILE_WIDTH][TILE_WIDTH];
+    
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+    
+    int Row = by * blockDim.y + ty;
+    int Col = bx * blockDim.x + tx;
+    
+    float Pvalue = 0;
+    
+    for (int p = 0; p < (M_width-1)/TILE_WIDTH+1; ++p) {
+        if (Row < N_height && p*TILE_WIDTH+tx < M_width)
+            ds_M[ty][tx] = M[Row*M_width + p*TILE_WIDTH+tx];
+        else
+            ds_M[ty][tx] = 0.0;
+
+        if (Col < N_width && p*TILE_WIDTH+ty < M_width)
+            ds_N[ty][tx] = N[(p*TILE_WIDTH+ty)*N_width + Col];
+        else
+            ds_N[ty][tx] = 0.0;
+
+        __syncthreads();
+
+        for (int i = 0; i < TILE_WIDTH; ++i)
+            Pvalue += ds_M[ty][i] * ds_N[i][tx];
+
+        __syncthreads();
+    }
+
+    if (Row < N_height && Col < N_width)
+        P[Row*N_width+Col] = Pvalue;
+}
+
+void init_matrix(float *m, int height, int width) {
+    for (int i = 0; i < height*width; i++) {
+        m[i] = rand() / (float)RAND_MAX;
+    }
+}
+
+int main()
+{
+    int M_height = 800;
+    int M_width = 1000;
+    int N_height = M_width;
+    int N_width = 600;
+
+    float *h_M, *h_N, *h_P;
+    float *d_M, *d_N, *d_P;
+
+    h_M = (float*) malloc(M_height * M_width * sizeof(float));
+    h_N = (float*) malloc(N_height * N_width * sizeof(float));
+    h_P = (float*) malloc(M_height * N_width * sizeof(float));
+
+    cudaMalloc((void**)&d_M, M_height * M_width * sizeof(float));
+    cudaMalloc((void**)&d_N, N_height * N_width * sizeof(float));
+    cudaMalloc((void**)&d_P, M_height * N_width * sizeof(float));
+
+    srand(time(0));
+    init_matrix(h_M, M_height, M_width);
+    init_matrix(h_N, N_height, N_width);
+
+    cudaMemcpy(d_M, h_M, M_height * M_width * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_N, h_N, N_height * N_width * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGrid((N_width-1)/TILE_WIDTH+1, (M_height-1)/TILE_WIDTH+1, 1);
+
+    // Create CUDA events for measuring time
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // Record start event
+    cudaEventRecord(start);
+
+    // Launch the kernel
+    MatrixMulKernel<<<dimGrid, dimBlock>>>(d_M, d_N, d_P, M_width, N_height, N_width);
+
+    // Record stop event
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    // Calculate the elapsed time
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    // Print the execution time
+    printf("Kernel execution time: %f ms\n", milliseconds);
+
+    cudaMemcpy(h_P, d_P, M_height * N_width * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Use result in h_P
+
+    free(h_M); free(h_N); free(h_P);
+    cudaFree(d_M); cudaFree(d_N); cudaFree(d_P);
+
+    return 0;
+}
